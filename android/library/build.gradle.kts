@@ -4,6 +4,9 @@ plugins {
     id("com.vanniktech.maven.publish")
 }
 
+import com.vanniktech.maven.publish.JavadocJar
+import com.vanniktech.maven.publish.SourcesJar
+
 group = "io.github.wangpeiyan"
 version = "0.1.0"
 
@@ -54,9 +57,6 @@ dependencies {
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.6.1")
 }
-
-import com.vanniktech.maven.publish.JavadocJar
-import com.vanniktech.maven.publish.SourcesJar
 
 mavenPublishing {
     coordinates(group.toString(), "exif-rm", version.toString())
