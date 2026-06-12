@@ -89,6 +89,14 @@ dependencies {
 }
 ```
 
+## Android (Maven Central)
+
+The library is available on Maven Central. Add to your `build.gradle`:
+
+```groovy
+implementation("io.github.wangpeiyan:exif-rm:0.1.0")
+```
+
 ## Building from Source (Mobile)
 
 ### iOS
