@@ -10,6 +10,7 @@ pub enum FileFormat {
     Pptx,
     Mp4,
     Webp,
+    Mp3,
 }
 
 /// Granular control over what metadata categories to remove.

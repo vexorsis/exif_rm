@@ -20,13 +20,14 @@ name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
 [features]
-default = ["jpeg", "png", "pdf", "office", "video", "webp"]
+default = ["jpeg", "png", "pdf", "office", "video", "webp", "mp3"]
 jpeg = []
 png = ["dep:crc32fast"]
 pdf = ["dep:lopdf"]
 office = ["dep:zip", "dep:quick-xml"]
 video = []
 webp = []
+mp3 = []
 cli = ["dep:clap"]
 
 [dependencies]
