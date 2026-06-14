@@ -135,7 +135,7 @@ This produces `library-release.aar` containing native libraries for arm64-v8a an
 **Key types:**
 
 - `RemovalOptions` — granular control over which metadata categories to remove
-- `FileFormat` — supported format enum (Jpeg, Png, Webp, Pdf, Docx, Xlsx, Pptx, Mp4)
+- `FileFormat` — supported format enum (Jpeg, Png, Webp, Pdf, Docx, Xlsx, Pptx, Mp4, Mp3)
 - `Error` — errors (UnsupportedFormat, InvalidData, EncryptedPdf, Io, External)
 
 Full API documentation: [docs.rs/exif_rm](https://docs.rs/exif_rm)
