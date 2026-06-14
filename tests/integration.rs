@@ -460,3 +460,31 @@ fn test_mp4_strip_removes_udta() {
     // udta box should be removed
     assert!(!output.windows(4).any(|w| w == b"udta"), "udta should be removed");
 }
+
+// --- WebP tests ---
+
+fn create_minimal_webp() -> Vec<u8> {
+    let vp8_payload: &[u8] = &[
+        0x9D, 0x01, 0x2A,
+        0x00, 0x01, 0x00, 0x01,
+        0x00, 0x02, 0x00, 0x02,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    ];
+    let vp8_chunk_size = vp8_payload.len() as u32;
+    let riff_size = 4 + 8 + vp8_chunk_size;
+    let mut webp = Vec::new();
+    webp.extend_from_slice(b"RIFF");
+    webp.extend_from_slice(&riff_size.to_le_bytes());
+    webp.extend_from_slice(b"WEBP");
+    webp.extend_from_slice(b"VP8 ");
+    webp.extend_from_slice(&vp8_chunk_size.to_le_bytes());
+    webp.extend_from_slice(vp8_payload);
+    webp
+}
+
+#[test]
+fn test_webp_format_detection() {
+    let input = create_minimal_webp();
+    let format = detect_format(&input).unwrap();
+    assert_eq!(format, FileFormat::Webp);
+}

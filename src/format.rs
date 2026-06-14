@@ -30,6 +30,14 @@ pub fn detect_format(bytes: &[u8]) -> crate::Result<FileFormat> {
         return Err(Error::UnsupportedFormat);
     }
 
+    // WebP: RIFF....WEBP
+    if bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WEBP" {
+        #[cfg(feature = "webp")]
+        return Ok(FileFormat::Webp);
+        #[cfg(not(feature = "webp"))]
+        return Err(Error::UnsupportedFormat);
+    }
+
     // Office Open XML (ZIP-based): PK 03 04
     if bytes.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
         #[cfg(feature = "office")]
