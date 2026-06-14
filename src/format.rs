@@ -38,6 +38,26 @@ pub fn detect_format(bytes: &[u8]) -> crate::Result<FileFormat> {
         return Err(Error::UnsupportedFormat);
     }
 
+    // MP3: ID3v2 header, MPEG sync word, or ID3v1 trailer
+    if bytes.starts_with(b"ID3") {
+        #[cfg(feature = "mp3")]
+        return Ok(FileFormat::Mp3);
+        #[cfg(not(feature = "mp3"))]
+        return Err(Error::UnsupportedFormat);
+    }
+    if bytes.len() >= 2 && bytes[0] == 0xFF && (bytes[1] & 0xE0) == 0xE0 {
+        #[cfg(feature = "mp3")]
+        return Ok(FileFormat::Mp3);
+        #[cfg(not(feature = "mp3"))]
+        return Err(Error::UnsupportedFormat);
+    }
+    if bytes.len() >= 128 && &bytes[bytes.len() - 128..bytes.len() - 125] == b"TAG" {
+        #[cfg(feature = "mp3")]
+        return Ok(FileFormat::Mp3);
+        #[cfg(not(feature = "mp3"))]
+        return Err(Error::UnsupportedFormat);
+    }
+
     // Office Open XML (ZIP-based): PK 03 04
     if bytes.starts_with(&[0x50, 0x4B, 0x03, 0x04]) {
         #[cfg(feature = "office")]
