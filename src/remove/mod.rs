@@ -8,3 +8,5 @@ pub mod pdf;
 pub mod office;
 #[cfg(feature = "video")]
 pub mod video;
+#[cfg(feature = "webp")]
+pub mod webp;
