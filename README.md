@@ -1,13 +1,13 @@
 # exif_rm
 
-Remove metadata from JPEG, PNG, WebP, PDF, DOCX, XLSX, PPTX, MP4, and MOV files.
+Remove metadata from JPEG, PNG, WebP, PDF, DOCX, XLSX, PPTX, MP4, MOV, and MP3 files.
 
 ![License](https://img.shields.io/badge/license-MIT-blue)
 
 ## What It Does
 
 - Strips EXIF, XMP, IPTC, ICC profiles, comments, and timestamps
-- Works on images (JPEG, PNG, WebP), documents (PDF, DOCX, XLSX, PPTX), and video (MP4, MOV)
+- Works on images (JPEG, PNG, WebP), documents (PDF, DOCX, XLSX, PPTX), video (MP4, MOV), and audio (MP3)
 - Pure Rust core with no runtime dependencies
 - CLI tool included
 - UniFFI bindings for iOS and Android
@@ -24,6 +24,7 @@ Remove metadata from JPEG, PNG, WebP, PDF, DOCX, XLSX, PPTX, MP4, and MOV files.
 | XLSX | core.xml, app.xml, custom.xml |
 | PPTX | core.xml, app.xml, custom.xml |
 | MP4/MOV | iTunes metadata, user data (udta), timed metadata tracks |
+| MP3 | ID3v1, ID3v2 (artist, title, album, cover art, lyrics, comments, etc.) |
 
 ## Quick Start
 
