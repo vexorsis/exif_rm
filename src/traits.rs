@@ -9,6 +9,7 @@ pub enum FileFormat {
     Xlsx,
     Pptx,
     Mp4,
+    Webp,
 }
 
 /// Granular control over what metadata categories to remove.
