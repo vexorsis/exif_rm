@@ -1,6 +1,6 @@
 [package]
 name = "exif_rm"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "Remove metadata from JPEG, PNG, WebP, PDF, DOCX, XLSX, PPTX, MP4, MOV files"
 license = "MIT"
