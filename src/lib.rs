@@ -2,7 +2,7 @@ pub mod error;
 pub mod format;
 pub mod traits;
 
-#[cfg(feature = "jpeg")]
+#[cfg(any(feature = "jpeg", feature = "png", feature = "pdf", feature = "office", feature = "video", feature = "webp"))]
 pub mod remove;
 
 pub use error::{Error, Result};

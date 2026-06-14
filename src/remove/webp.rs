@@ -51,8 +51,8 @@ impl MetadataRemover for WebpRemover {
             output.extend_from_slice(fourcc);
             output.extend_from_slice(&(chunk_size as u32).to_le_bytes());
             output.extend_from_slice(&input[pos + 8..payload_end]);
-            if chunk_size % 2 != 0 && padded_end <= input.len() {
-                output.push(input[payload_end]);
+            if chunk_size % 2 != 0 {
+                output.push(0);
             }
 
             pos = padded_end;
