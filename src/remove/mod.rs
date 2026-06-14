@@ -10,3 +10,5 @@ pub mod office;
 pub mod video;
 #[cfg(feature = "webp")]
 pub mod webp;
+#[cfg(feature = "mp3")]
+pub mod mp3;
