@@ -2,7 +2,7 @@
 name = "exif_rm"
 version = "0.1.0"
 edition = "2021"
-description = "Remove metadata from JPEG, PNG, PDF, DOCX, XLSX, PPTX files"
+description = "Remove metadata from JPEG, PNG, WebP, PDF, DOCX, XLSX, PPTX files"
 license = "MIT"
 
 [lib]
@@ -20,12 +20,13 @@ name = "uniffi-bindgen"
 path = "uniffi-bindgen.rs"
 
 [features]
-default = ["jpeg", "png", "pdf", "office", "video"]
+default = ["jpeg", "png", "pdf", "office", "video", "webp"]
 jpeg = []
 png = ["dep:crc32fast"]
 pdf = ["dep:lopdf"]
 office = ["dep:zip", "dep:quick-xml"]
 video = []
+webp = []
 cli = ["dep:clap"]
 
 [dependencies]
