@@ -557,3 +557,114 @@ fn test_webp_no_metadata_still_valid() {
     assert!(&output[8..12] == b"WEBP");
     assert!(output.windows(4).any(|w| w == b"VP8 "));
 }
+
+// --- MP3 tests ---
+
+/// Minimal MPEG-1 Layer III audio frame header (4 bytes) + small payload.
+/// This is a valid-looking sync word + frame header, not real audio.
+fn minimal_mpeg_frame() -> Vec<u8> {
+    // MPEG1, Layer3, no CRC, 128kbps, 44100Hz, no padding, stereo
+    let mut frame = vec![0xFF, 0xFB, 0x90, 0x00];
+    // Pad with some dummy data to make it look like a frame
+    frame.extend_from_slice(&[0u8; 100]);
+    frame
+}
+
+/// Build an ID3v2 tag header with the given body size (syncsafe encoded).
+/// Returns just the 10-byte header.
+fn id3v2_header(tag_body_size: u32, has_footer: bool) -> Vec<u8> {
+    let mut header = Vec::with_capacity(10);
+    header.extend_from_slice(b"ID3");           // magic
+    header.extend_from_slice(&[0x03, 0x00]);    // version 2.3.0
+    let flags = if has_footer { 0x10u8 } else { 0x00u8 };
+    header.push(flags);                          // flags
+    // syncsafe integer encoding for size
+    let size = tag_body_size;
+    header.push(((size >> 21) & 0x7F) as u8);
+    header.push(((size >> 14) & 0x7F) as u8);
+    header.push(((size >> 7) & 0x7F) as u8);
+    header.push((size & 0x7F) as u8);
+    header
+}
+
+/// Build an ID3v1 tag (128 bytes) with dummy metadata.
+fn id3v1_tag() -> Vec<u8> {
+    let mut tag = Vec::with_capacity(128);
+    tag.extend_from_slice(b"TAG");               // signature
+    tag.extend_from_slice(b"Title\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"); // 30 bytes
+    tag.extend_from_slice(b"Artist\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"); // 30 bytes
+    tag.extend_from_slice(b"Album\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00"); // 30 bytes
+    tag.extend_from_slice(b"2024");              // year (4 bytes)
+    tag.extend_from_slice(&[0u8; 30]);           // comment (30 bytes)
+    tag.push(0);                                  // genre
+    tag
+}
+
+fn create_mp3_with_id3v2() -> Vec<u8> {
+    let body = b"TIT2\x00\x00\x00\x04\x00\x00\x00Test"; // fake ID3v2 frame
+    let mut file = id3v2_header(body.len() as u32, false);
+    file.extend_from_slice(body);
+    file.extend_from_slice(&minimal_mpeg_frame());
+    file
+}
+
+fn create_mp3_with_id3v1() -> Vec<u8> {
+    let mut file = minimal_mpeg_frame();
+    file.extend_from_slice(&id3v1_tag());
+    file
+}
+
+fn create_mp3_with_both_tags() -> Vec<u8> {
+    let body = b"TIT2\x00\x00\x00\x04\x00\x00\x00Test";
+    let mut file = id3v2_header(body.len() as u32, false);
+    file.extend_from_slice(body);
+    file.extend_from_slice(&minimal_mpeg_frame());
+    file.extend_from_slice(&id3v1_tag());
+    file
+}
+
+#[test]
+fn test_mp3_strip_removes_id3v2() {
+    let input = create_mp3_with_id3v2();
+    let output = strip_metadata(&input).unwrap();
+    assert!(!output.starts_with(b"ID3"), "ID3v2 header should be removed");
+    assert!(output.starts_with(&[0xFF, 0xFB]), "audio data should start with sync word");
+}
+
+#[test]
+fn test_mp3_strip_removes_id3v1() {
+    let input = create_mp3_with_id3v1();
+    let output = strip_metadata(&input).unwrap();
+    assert!(!output.windows(3).any(|w| w == b"TAG"), "ID3v1 tag should be removed");
+}
+
+#[test]
+fn test_mp3_strip_removes_both_tags() {
+    let input = create_mp3_with_both_tags();
+    let output = strip_metadata(&input).unwrap();
+    assert!(!output.starts_with(b"ID3"), "ID3v2 header should be removed");
+    assert!(!output.windows(3).any(|w| w == b"TAG"), "ID3v1 tag should be removed");
+    assert!(output.starts_with(&[0xFF, 0xFB]), "audio data should remain");
+}
+
+#[test]
+fn test_mp3_format_detection() {
+    let input = create_mp3_with_id3v2();
+    let format = detect_format(&input).unwrap();
+    assert_eq!(format, FileFormat::Mp3);
+}
+
+#[test]
+fn test_mp3_clean_passthrough() {
+    let input = minimal_mpeg_frame();
+    let output = strip_metadata(&input).unwrap();
+    assert_eq!(input, output, "clean MP3 should pass through unchanged");
+}
+
+#[test]
+fn test_mp3_only_tags_returns_error() {
+    // ID3v2 header with 0-byte body, no audio data
+    let input = id3v2_header(0, false);
+    let result = strip_metadata(&input);
+    assert!(result.is_err(), "file with only tags and no audio should error");
+}
