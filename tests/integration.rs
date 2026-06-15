@@ -713,3 +713,82 @@ fn test_mp3_only_tags_returns_error() {
     let result = strip_metadata(&input);
     assert!(result.is_err(), "file with only tags and no audio should error");
 }
+
+fn create_gif_with_metadata() -> Vec<u8> {
+    let mut gif = Vec::new();
+    gif.extend_from_slice(b"GIF89a");
+    gif.extend_from_slice(&[0x01, 0x00, 0x01, 0x00]);
+    gif.push(0x00);
+    gif.push(0x00);
+    gif.push(0x00);
+    // Comment Extension
+    gif.push(0x21);
+    gif.push(0xFE);
+    gif.push(0x0B);
+    gif.extend_from_slice(b"Test Commen"); // 11 bytes to match 0x0B
+    gif.push(0x00);
+    // NETSCAPE2.0 Application Extension
+    gif.push(0x21);
+    gif.push(0xFF);
+    gif.extend_from_slice(b"NETSCAPE2.0");
+    gif.push(0x03);
+    gif.push(0x01);
+    gif.extend_from_slice(&[0x00, 0x00]);
+    gif.push(0x00);
+    // XMP Application Extension
+    gif.push(0x21);
+    gif.push(0xFF);
+    gif.extend_from_slice(b"XMP DataXMP");
+    let xmp = b"<x:xmpmeta>fake</x:xmpmeta>";
+    gif.push(xmp.len() as u8);
+    gif.extend_from_slice(xmp);
+    gif.push(0x00);
+    // Graphic Control Extension
+    gif.push(0x21);
+    gif.push(0xF9);
+    gif.push(0x04);
+    gif.extend_from_slice(&[0x00, 0x0A, 0x00, 0x00]);
+    gif.push(0x00);
+    // Image Descriptor
+    gif.push(0x2C);
+    gif.extend_from_slice(&[0x00, 0x00, 0x00, 0x00]);
+    gif.extend_from_slice(&[0x01, 0x00, 0x01, 0x00]);
+    gif.push(0x00);
+    gif.push(0x02);
+    gif.push(0x02);
+    gif.extend_from_slice(&[0x4C, 0x01]);
+    gif.push(0x00);
+    gif.push(0x3B);
+    gif
+}
+
+#[test]
+fn test_gif_strip_removes_metadata() {
+    let input = create_gif_with_metadata();
+    let output = strip_metadata(&input).unwrap();
+    // Comment should be removed
+    assert!(!output.windows(2).any(|w| w == &[0x21, 0xFE]));
+    // XMP should be removed
+    assert!(!output.windows(11).any(|w| w == b"XMP DataXMP"));
+    // NETSCAPE2.0 should be preserved
+    assert!(output.windows(11).any(|w| w == b"NETSCAPE2.0"));
+    // GCE should be preserved
+    assert!(output.windows(2).any(|w| w == &[0x21, 0xF9]));
+    // Image data should be preserved
+    assert!(output.contains(&0x2C));
+    assert!(output.contains(&0x3B));
+}
+
+#[test]
+fn test_gif_clean_passthrough() {
+    let input = create_minimal_gif();
+    let output = strip_metadata(&input).unwrap();
+    assert_eq!(input, output, "clean GIF should pass through unchanged");
+}
+
+#[test]
+fn test_gif_strip_owned() {
+    let input = create_gif_with_metadata();
+    let output = strip_metadata_owned(input).unwrap();
+    assert!(!output.windows(2).any(|w| w == &[0x21, 0xFE]));
+}
