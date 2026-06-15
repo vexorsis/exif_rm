@@ -82,7 +82,7 @@ impl MetadataRemover for GifRemover {
                     pos += 1;
 
                     // Copy image data sub-blocks
-                    pos = copy_sub_blocks(&input, pos, &mut out)?;
+                    pos = copy_sub_blocks(input, pos, &mut out)?;
                 }
 
                 // Extension
@@ -134,29 +134,29 @@ impl MetadataRemover for GifRemover {
                                 out.push(0xFF);
                                 out.extend_from_slice(app_id);
                                 pos += 11;
-                                pos = copy_sub_blocks(&input, pos, &mut out)?;
+                                pos = copy_sub_blocks(input, pos, &mut out)?;
                             } else {
                                 // Strip: skip app id + sub-blocks
                                 pos += 11;
-                                pos = skip_sub_blocks(&input, pos)?;
+                                pos = skip_sub_blocks(input, pos)?;
                             }
                         }
 
                         // Comment Extension — strip
                         0xFE => {
-                            pos = skip_sub_blocks(&input, pos)?;
+                            pos = skip_sub_blocks(input, pos)?;
                         }
 
                         // Plain Text Extension — strip
                         0x01 => {
-                            pos = skip_sub_blocks(&input, pos)?;
+                            pos = skip_sub_blocks(input, pos)?;
                         }
 
                         // Unknown extension — preserve (safe default)
                         _ => {
                             out.push(0x21);
                             out.push(label);
-                            pos = copy_sub_blocks(&input, pos, &mut out)?;
+                            pos = copy_sub_blocks(input, pos, &mut out)?;
                         }
                     }
                 }
