@@ -10,9 +10,9 @@ Add `Mp3` variant to `FileFormat` enum. Detection in `src/format.rs` checks:
 
 1. First 3 bytes are `ID3` (0x49, 0x44, 0x33) — ID3v2 header present
 2. First 2 bytes match an MP3 sync word — `0xFF 0xFB`, `0xFF 0xF3`, `0xFF 0xF2`, or `0xFF 0xE0`-`0xFF 0xFF` (MPEG audio frame header)
-3. Last 128 bytes start with `TAG` (0x54, 0x41, 0x47) — ID3v1 trailer
+3. Last 128 bytes start with `TAG` (0x54, 0x41, 0x47) — ID3v1 trailer (only checked if input is at least 128 bytes)
 
-If any match, return `Mp3`.
+If any match, return `Mp3`. Detection order: check ID3v2 header first, then sync word, then ID3v1 trailer.
 
 ## ID3v2 Header Stripping
 
