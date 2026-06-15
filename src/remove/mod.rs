@@ -12,3 +12,5 @@ pub mod video;
 pub mod webp;
 #[cfg(feature = "mp3")]
 pub mod mp3;
+#[cfg(feature = "gif")]
+pub mod gif;

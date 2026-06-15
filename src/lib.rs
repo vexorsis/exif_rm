@@ -2,7 +2,7 @@ pub mod error;
 pub mod format;
 pub mod traits;
 
-#[cfg(any(feature = "jpeg", feature = "png", feature = "pdf", feature = "office", feature = "video", feature = "webp", feature = "mp3"))]
+#[cfg(any(feature = "jpeg", feature = "png", feature = "pdf", feature = "office", feature = "video", feature = "webp", feature = "mp3", feature = "gif"))]
 pub mod remove;
 
 pub use error::{Error, Result};
@@ -45,6 +45,8 @@ fn get_remover(format: FileFormat) -> Box<dyn MetadataRemover> {
         FileFormat::Webp => Box::new(remove::webp::WebpRemover),
         #[cfg(feature = "mp3")]
         FileFormat::Mp3 => Box::new(remove::mp3::Mp3Remover),
+        #[cfg(feature = "gif")]
+        FileFormat::Gif => Box::new(remove::gif::GifRemover),
         #[allow(unreachable_patterns)]
         _ => panic!("format not supported in this build configuration"),
     }
