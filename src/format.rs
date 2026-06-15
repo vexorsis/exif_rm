@@ -16,6 +16,14 @@ pub fn detect_format(bytes: &[u8]) -> crate::Result<FileFormat> {
         return Ok(FileFormat::Png);
     }
 
+    // GIF: GIF87a or GIF89a
+    if bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        #[cfg(feature = "gif")]
+        return Ok(FileFormat::Gif);
+        #[cfg(not(feature = "gif"))]
+        return Err(Error::UnsupportedFormat);
+    }
+
     // PDF: %PDF
     if bytes.starts_with(b"%PDF") {
         return Ok(FileFormat::Pdf);

@@ -661,6 +661,51 @@ fn test_mp3_clean_passthrough() {
     assert_eq!(input, output, "clean MP3 should pass through unchanged");
 }
 
+// --- GIF tests ---
+
+fn create_minimal_gif() -> Vec<u8> {
+    let mut gif = Vec::new();
+    // Header: GIF89a
+    gif.extend_from_slice(b"GIF89a");
+    // Logical Screen Descriptor: 1x1, no GCT
+    gif.extend_from_slice(&[0x01, 0x00]); // width = 1
+    gif.extend_from_slice(&[0x01, 0x00]); // height = 1
+    gif.push(0x00); // packed: no GCT, color resolution 1, no sort, GCT size = 0
+    gif.push(0x00); // background color index
+    gif.push(0x00); // pixel aspect ratio
+    // Image Descriptor
+    gif.push(0x2C); // image separator
+    gif.extend_from_slice(&[0x00, 0x00]); // left = 0
+    gif.extend_from_slice(&[0x00, 0x00]); // top = 0
+    gif.extend_from_slice(&[0x01, 0x00]); // width = 1
+    gif.extend_from_slice(&[0x01, 0x00]); // height = 1
+    gif.push(0x00); // packed: no LCT, not interlaced
+    // LZW minimum code size
+    gif.push(0x02);
+    // Image data sub-block: single pixel (index 0)
+    gif.push(0x02); // sub-block size = 2
+    gif.extend_from_slice(&[0x4C, 0x01]); // LZW compressed data for 1 pixel
+    gif.push(0x00); // sub-block terminator
+    // Trailer
+    gif.push(0x3B);
+    gif
+}
+
+#[test]
+fn test_gif_format_detection() {
+    let input = create_minimal_gif();
+    let format = detect_format(&input).unwrap();
+    assert_eq!(format, FileFormat::Gif);
+}
+
+#[test]
+fn test_gif87a_format_detection() {
+    let mut gif = create_minimal_gif();
+    gif[0..6].copy_from_slice(b"GIF87a");
+    let format = detect_format(&gif).unwrap();
+    assert_eq!(format, FileFormat::Gif);
+}
+
 #[test]
 fn test_mp3_only_tags_returns_error() {
     // ID3v2 header with 0-byte body, no audio data
