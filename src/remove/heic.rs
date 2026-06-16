@@ -18,7 +18,7 @@ impl MetadataRemover for HeicRemover {
         let ftyp_size = u32::from_be_bytes(input[0..4].try_into().unwrap()) as usize;
         let major_brand = &input[8..12];
         if major_brand != b"heic"
-            && input.get(16..ftyp_size).map_or(true, |brands| !brands.chunks_exact(4).any(|b| b == b"heic"))
+            && input.get(16..ftyp_size).is_none_or(|brands| !brands.chunks_exact(4).any(|b| b == b"heic"))
         {
             return Err(Error::InvalidData("HEIC".into()));
         }
@@ -38,14 +38,13 @@ impl MetadataRemover for HeicRemover {
             match &box_type {
                 b"meta" => {
                     found_meta = true;
-                    // meta box: 8-byte box header + content
-                    // content starts with version+flags (4 bytes for fullbox), then inner boxes
-                    let meta_header = &input[box_start..box_start + header_size];
                     let meta_content = &input[box_start + header_size..box_end];
 
                     let processed = process_meta_box(meta_content, options)?;
-                    // Rebuild meta box: original header + processed content
-                    output.extend_from_slice(meta_header);
+                    // Write meta box header with correct size for the (possibly smaller) content
+                    let new_size = (header_size + processed.len()) as u32;
+                    output.extend_from_slice(&new_size.to_be_bytes());
+                    output.extend_from_slice(b"meta");
                     output.extend_from_slice(&processed);
                 }
                 _ => {
@@ -114,24 +113,30 @@ fn process_meta_box(meta_data: &[u8], options: &RemovalOptions) -> crate::Result
             break;
         }
 
-        let box_header_bytes = &meta_data[4 + inner_start..4 + inner_start + header_size];
         let box_content = &meta_data[4 + inner_start + header_size..4 + inner_end];
 
         match &box_type {
             b"iinf" => {
                 let rebuilt = rebuild_iinf(box_content, &removed_ids)?;
-                result.extend_from_slice(box_header_bytes);
+                // Write box header with correct size
+                let new_size = (header_size + rebuilt.len()) as u32;
+                result.extend_from_slice(&new_size.to_be_bytes());
+                result.extend_from_slice(&box_type);
                 result.extend_from_slice(&rebuilt);
             }
             b"iloc" => {
                 let rebuilt = rebuild_iloc(box_content, &removed_ids)?;
-                result.extend_from_slice(box_header_bytes);
+                let new_size = (header_size + rebuilt.len()) as u32;
+                result.extend_from_slice(&new_size.to_be_bytes());
+                result.extend_from_slice(&box_type);
                 result.extend_from_slice(&rebuilt);
             }
             b"iprp" => {
                 if options.icc_profile {
                     let cleaned = process_iprp(box_content)?;
-                    result.extend_from_slice(box_header_bytes);
+                    let new_size = (header_size + cleaned.len()) as u32;
+                    result.extend_from_slice(&new_size.to_be_bytes());
+                    result.extend_from_slice(&box_type);
                     result.extend_from_slice(&cleaned);
                 } else {
                     result.extend_from_slice(&meta_data[4 + inner_start..4 + inner_end]);
@@ -326,7 +331,7 @@ fn rebuild_iloc(iloc_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>>
     let index_size = if version == 1 { (iloc_data[5] & 0x0F) as usize } else { 0 };
 
     let item_count_size = if version < 2 { 2 } else { 4 };
-    let item_count_offset = if version == 1 { 6 } else { 6 };
+    let item_count_offset = 6;
 
     if iloc_data.len() < item_count_offset + item_count_size {
         return Err(Error::InvalidData("HEIC: iloc box too short for item count".into()));
@@ -474,13 +479,17 @@ fn process_iprp(iprp_data: &[u8]) -> crate::Result<Vec<u8>> {
             b"ipco" => {
                 let ipco_data = &iprp_data[data_start..box_end];
                 let cleaned = rebuild_ipco(ipco_data, colr_idx)?;
-                result.extend_from_slice(&iprp_data[box_start..box_start + header_size]);
+                let new_size = (header_size + cleaned.len()) as u32;
+                result.extend_from_slice(&new_size.to_be_bytes());
+                result.extend_from_slice(b"ipco");
                 result.extend_from_slice(&cleaned);
             }
             b"ipma" => {
                 let ipma_data = &iprp_data[data_start..box_end];
                 let cleaned = rebuild_ipma(ipma_data, colr_idx)?;
-                result.extend_from_slice(&iprp_data[box_start..box_start + header_size]);
+                let new_size = (header_size + cleaned.len()) as u32;
+                result.extend_from_slice(&new_size.to_be_bytes());
+                result.extend_from_slice(b"ipma");
                 result.extend_from_slice(&cleaned);
             }
             _ => {
@@ -910,5 +919,41 @@ mod tests {
         heic.extend_from_slice(b"meta");
         let result = HeicRemover.remove_metadata(&heic, &RemovalOptions::default());
         assert!(result.is_err(), "truncated HEIC should error");
+    }
+
+    /// Verify that all box sizes in the output are internally consistent.
+    /// This catches the bug where rebuilt boxes keep stale size headers.
+    fn verify_box_sizes(data: &[u8]) {
+        let mut cursor = Cursor::new(data);
+        while let Some((total_size, header_size, box_type)) = read_box_header(&mut cursor) {
+            let declared_end = cursor.position() as usize - header_size + total_size;
+            assert!(declared_end <= data.len(),
+                "box {:?} declares size {} but data is only {} bytes",
+                std::str::from_utf8(&box_type).unwrap_or("????"),
+                declared_end, data.len());
+            cursor.set_position((cursor.position() as usize - header_size + total_size) as u64);
+        }
+    }
+
+    #[test]
+    fn test_heic_strip_exif_box_sizes_consistent() {
+        let input = create_heic_with_exif();
+        let output = HeicRemover.remove_metadata(&input, &RemovalOptions::default()).unwrap();
+        verify_box_sizes(&output);
+    }
+
+    #[test]
+    fn test_heic_strip_xmp_box_sizes_consistent() {
+        let input = create_heic_with_xmp();
+        let output = HeicRemover.remove_metadata(&input, &RemovalOptions::default()).unwrap();
+        verify_box_sizes(&output);
+    }
+
+    #[test]
+    fn test_heic_strip_icc_box_sizes_consistent() {
+        let input = create_heic_with_icc();
+        let options = RemovalOptions { icc_profile: true, ..RemovalOptions::default() };
+        let output = HeicRemover.remove_metadata(&input, &options).unwrap();
+        verify_box_sizes(&output);
     }
 }
