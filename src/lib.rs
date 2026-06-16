@@ -47,6 +47,8 @@ fn get_remover(format: FileFormat) -> Box<dyn MetadataRemover> {
         FileFormat::Mp3 => Box::new(remove::mp3::Mp3Remover),
         #[cfg(feature = "gif")]
         FileFormat::Gif => Box::new(remove::gif::GifRemover),
+        #[cfg(feature = "heic")]
+        FileFormat::Heic => Box::new(remove::heic::HeicRemover),
         #[allow(unreachable_patterns)]
         _ => panic!("format not supported in this build configuration"),
     }
