@@ -155,6 +155,7 @@ fn process_meta_box(meta_data: &[u8], options: &RemovalOptions) -> crate::Result
 
 /// Find metadata item IDs from iinf box content (after the box header, i.e., fullbox content).
 /// The content starts with version(1) + flags(3) + entry_count.
+/// item_id width in infe entries depends on iinf version: 2 bytes for v0, 4 bytes for v1+.
 fn find_metadata_item_ids(iinf_data: &[u8], options: &RemovalOptions) -> Vec<u16> {
     let mut ids = Vec::new();
 
@@ -162,8 +163,8 @@ fn find_metadata_item_ids(iinf_data: &[u8], options: &RemovalOptions) -> Vec<u16
         return ids;
     }
 
-    let version = iinf_data[0];
-    let entry_count = if version == 0 {
+    let iinf_version = iinf_data[0];
+    let entry_count = if iinf_version == 0 {
         u16::from_be_bytes([iinf_data[4], iinf_data[5]]) as usize
     } else {
         if iinf_data.len() < 8 {
@@ -172,14 +173,15 @@ fn find_metadata_item_ids(iinf_data: &[u8], options: &RemovalOptions) -> Vec<u16
         u32::from_be_bytes([iinf_data[4], iinf_data[5], iinf_data[6], iinf_data[7]]) as usize
     };
 
-    let mut offset = if version == 0 { 6 } else { 8 };
+    let item_id_size = if iinf_version == 0 { 2usize } else { 4 };
+
+    let mut offset = if iinf_version == 0 { 6 } else { 8 };
 
     for _ in 0..entry_count {
         if offset + 8 > iinf_data.len() {
             break;
         }
 
-        // Each infe is itself a fullbox
         let infe_size = u32::from_be_bytes(
             iinf_data[offset..offset + 4].try_into().unwrap_or([0u8; 4]),
         ) as usize;
@@ -188,24 +190,20 @@ fn find_metadata_item_ids(iinf_data: &[u8], options: &RemovalOptions) -> Vec<u16
         }
 
         let infe_data = &iinf_data[offset..offset + infe_size];
-        let infe_version = infe_data[8]; // version byte of the infe fullbox
+        let infe_version = infe_data[8];
 
-        let (item_id, item_type_offset) = if infe_version <= 1 {
-            // v0/v1: item_id at offset 12 (2 bytes), item_type at offset 16 (4 bytes)
-            if infe_data.len() < 20 {
-                offset += infe_size;
-                continue;
-            }
-            let id = u16::from_be_bytes([infe_data[12], infe_data[13]]);
-            (id, 16)
+        // item_id size depends on iinf_version, not infe_version
+        // After fullbox header (12 bytes): item_id(item_id_size) + protection_index(2) + item_type(4)
+        let item_type_offset = 12 + item_id_size + 2;
+        if item_type_offset + 4 > infe_data.len() {
+            offset += infe_size;
+            continue;
+        }
+
+        let item_id = if item_id_size == 2 {
+            u16::from_be_bytes([infe_data[12], infe_data[13]])
         } else {
-            // v2+: item_id at offset 12 (4 bytes), item_type at offset 16 (4 bytes)
-            if infe_data.len() < 20 {
-                offset += infe_size;
-                continue;
-            }
-            let id = u32::from_be_bytes([infe_data[12], infe_data[13], infe_data[14], infe_data[15]]) as u16;
-            (id, 16)
+            u32::from_be_bytes([infe_data[12], infe_data[13], infe_data[14], infe_data[15]]) as u16
         };
 
         let item_type = &infe_data[item_type_offset..item_type_offset + 4];
@@ -232,6 +230,7 @@ fn rebuild_iinf(iinf_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>>
 
     let version = iinf_data[0];
     let flags = &iinf_data[1..4];
+    let item_id_size = if version == 0 { 2usize } else { 4 };
 
     let mut result = vec![version];
     result.extend_from_slice(flags);
@@ -263,7 +262,7 @@ fn rebuild_iinf(iinf_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>>
 
         let infe_data = &iinf_data[offset..offset + infe_size];
 
-        if !is_infe_removed(infe_data, removed_ids) {
+        if !is_infe_removed(infe_data, removed_ids, item_id_size) {
             kept_entries.push(infe_data.to_vec());
             kept_count += 1;
         }
@@ -287,22 +286,15 @@ fn rebuild_iinf(iinf_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>>
 }
 
 /// Check if an infe entry's item_id is in the removed_ids list.
-fn is_infe_removed(infe_data: &[u8], removed_ids: &[u16]) -> bool {
-    if infe_data.len() < 12 {
+/// item_id_size depends on the parent iinf version: 2 for v0, 4 for v1+.
+fn is_infe_removed(infe_data: &[u8], removed_ids: &[u16], item_id_size: usize) -> bool {
+    if infe_data.len() < 12 + item_id_size {
         return false;
     }
 
-    let infe_version = infe_data[8]; // version byte of the infe fullbox
-
-    let item_id = if infe_version <= 1 {
-        if infe_data.len() < 14 {
-            return false;
-        }
+    let item_id = if item_id_size == 2 {
         u16::from_be_bytes([infe_data[12], infe_data[13]])
     } else {
-        if infe_data.len() < 16 {
-            return false;
-        }
         u32::from_be_bytes([infe_data[12], infe_data[13], infe_data[14], infe_data[15]]) as u16
     };
 
