@@ -1,3 +1,5 @@
+#[cfg(any(feature = "video", feature = "heic"))]
+pub mod isobmff;
 #[cfg(feature = "jpeg")]
 pub mod jpeg;
 #[cfg(feature = "png")]
