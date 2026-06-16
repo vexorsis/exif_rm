@@ -12,6 +12,7 @@ pub enum FileFormat {
     Webp,
     Mp3,
     Gif,
+    Heic,
 }
 
 /// Granular control over what metadata categories to remove.

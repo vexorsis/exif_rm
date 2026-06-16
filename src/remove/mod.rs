@@ -14,3 +14,5 @@ pub mod webp;
 pub mod mp3;
 #[cfg(feature = "gif")]
 pub mod gif;
+#[cfg(feature = "heic")]
+pub mod heic;
