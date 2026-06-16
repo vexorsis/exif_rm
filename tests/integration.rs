@@ -792,3 +792,191 @@ fn test_gif_strip_owned() {
     let output = strip_metadata_owned(input).unwrap();
     assert!(!output.windows(2).any(|w| w == &[0x21, 0xFE]));
 }
+
+// --- HEIC tests ---
+
+fn create_minimal_heic() -> Vec<u8> {
+    let mut heic = Vec::new();
+
+    let make_box = |box_type: &[u8], content: &[u8]| -> Vec<u8> {
+        let size = (8 + content.len()) as u32;
+        let mut buf = size.to_be_bytes().to_vec();
+        buf.extend_from_slice(box_type);
+        buf.extend_from_slice(content);
+        buf
+    };
+
+    let make_fullbox = |box_type: &[u8], version: u8, flags: u32, content: &[u8]| -> Vec<u8> {
+        let vf = ((version as u32) << 24) | flags;
+        let mut full_content = vf.to_be_bytes().to_vec();
+        full_content.extend_from_slice(content);
+        make_box(box_type, &full_content)
+    };
+
+    // ftyp box
+    let mut ftyp_content = b"heic".to_vec();
+    ftyp_content.extend_from_slice(&0u32.to_be_bytes());
+    heic.extend_from_slice(&make_box(b"ftyp", &ftyp_content));
+
+    // hdlr
+    let mut hdlr_content = Vec::new();
+    hdlr_content.extend_from_slice(&0u32.to_be_bytes());
+    hdlr_content.extend_from_slice(b"pict");
+    hdlr_content.extend_from_slice(&[0u8; 12]);
+    hdlr_content.push(0);
+    let hdlr = make_fullbox(b"hdlr", 0, 0, &hdlr_content);
+
+    // iinf with 1 item: hvc1 (id=1)
+    let mut infe1 = Vec::new();
+    infe1.extend_from_slice(&1u16.to_be_bytes());
+    infe1.extend_from_slice(&0u16.to_be_bytes());
+    infe1.extend_from_slice(b"hvc1");
+    infe1.push(0);
+    let iinf_entries = make_fullbox(b"infe", 0, 0, &infe1);
+    let mut iinf_content = Vec::new();
+    iinf_content.extend_from_slice(&1u16.to_be_bytes());
+    iinf_content.extend_from_slice(&iinf_entries);
+    let iinf = make_fullbox(b"iinf", 0, 0, &iinf_content);
+
+    // iloc with 1 item
+    let mut iloc_content = Vec::new();
+    iloc_content.push(0x44);
+    iloc_content.push(0x00);
+    iloc_content.extend_from_slice(&1u16.to_be_bytes());
+    iloc_content.extend_from_slice(&1u16.to_be_bytes());
+    iloc_content.extend_from_slice(&0u16.to_be_bytes());
+    iloc_content.extend_from_slice(&1u16.to_be_bytes());
+    iloc_content.extend_from_slice(&100u32.to_be_bytes());
+    iloc_content.extend_from_slice(&20u32.to_be_bytes());
+    let iloc = make_fullbox(b"iloc", 0, 0, &iloc_content);
+
+    let mut meta_inner = Vec::new();
+    meta_inner.extend_from_slice(&hdlr);
+    meta_inner.extend_from_slice(&iinf);
+    meta_inner.extend_from_slice(&iloc);
+    let meta = make_fullbox(b"meta", 0, 0, &meta_inner);
+    heic.extend_from_slice(&meta);
+
+    heic.extend_from_slice(&make_box(b"mdat", b"fake image data"));
+
+    heic
+}
+
+fn create_heic_with_metadata() -> Vec<u8> {
+    let mut heic = Vec::new();
+
+    let make_box = |box_type: &[u8], content: &[u8]| -> Vec<u8> {
+        let size = (8 + content.len()) as u32;
+        let mut buf = size.to_be_bytes().to_vec();
+        buf.extend_from_slice(box_type);
+        buf.extend_from_slice(content);
+        buf
+    };
+
+    let make_fullbox = |box_type: &[u8], version: u8, flags: u32, content: &[u8]| -> Vec<u8> {
+        let vf = ((version as u32) << 24) | flags;
+        let mut full_content = vf.to_be_bytes().to_vec();
+        full_content.extend_from_slice(content);
+        make_box(box_type, &full_content)
+    };
+
+    // ftyp box
+    let mut ftyp_content = b"heic".to_vec();
+    ftyp_content.extend_from_slice(&0u32.to_be_bytes());
+    heic.extend_from_slice(&make_box(b"ftyp", &ftyp_content));
+
+    // hdlr
+    let mut hdlr_content = Vec::new();
+    hdlr_content.extend_from_slice(&0u32.to_be_bytes());
+    hdlr_content.extend_from_slice(b"pict");
+    hdlr_content.extend_from_slice(&[0u8; 12]);
+    hdlr_content.push(0);
+    let hdlr = make_fullbox(b"hdlr", 0, 0, &hdlr_content);
+
+    // iinf with 3 items: Exif (id=1), mime/XMP (id=2), hvc1 (id=3)
+    let mut iinf_entries = Vec::new();
+    let mut infe1 = Vec::new();
+    infe1.extend_from_slice(&1u16.to_be_bytes());
+    infe1.extend_from_slice(&0u16.to_be_bytes());
+    infe1.extend_from_slice(b"Exif");
+    infe1.push(0);
+    iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe1));
+
+    let mut infe2 = Vec::new();
+    infe2.extend_from_slice(&2u16.to_be_bytes());
+    infe2.extend_from_slice(&0u16.to_be_bytes());
+    infe2.extend_from_slice(b"mime");
+    infe2.push(0);
+    iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe2));
+
+    let mut infe3 = Vec::new();
+    infe3.extend_from_slice(&3u16.to_be_bytes());
+    infe3.extend_from_slice(&0u16.to_be_bytes());
+    infe3.extend_from_slice(b"hvc1");
+    infe3.push(0);
+    iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe3));
+
+    let mut iinf_content = Vec::new();
+    iinf_content.extend_from_slice(&3u16.to_be_bytes());
+    iinf_content.extend_from_slice(&iinf_entries);
+    let iinf = make_fullbox(b"iinf", 0, 0, &iinf_content);
+
+    // iloc with 3 items
+    let mut iloc_content = Vec::new();
+    iloc_content.push(0x44);
+    iloc_content.push(0x00);
+    iloc_content.extend_from_slice(&3u16.to_be_bytes());
+    // Exif item
+    iloc_content.extend_from_slice(&1u16.to_be_bytes());
+    iloc_content.extend_from_slice(&0u16.to_be_bytes());
+    iloc_content.extend_from_slice(&1u16.to_be_bytes());
+    iloc_content.extend_from_slice(&100u32.to_be_bytes());
+    iloc_content.extend_from_slice(&10u32.to_be_bytes());
+    // XMP item
+    iloc_content.extend_from_slice(&2u16.to_be_bytes());
+    iloc_content.extend_from_slice(&0u16.to_be_bytes());
+    iloc_content.extend_from_slice(&1u16.to_be_bytes());
+    iloc_content.extend_from_slice(&200u32.to_be_bytes());
+    iloc_content.extend_from_slice(&15u32.to_be_bytes());
+    // hvc1 item
+    iloc_content.extend_from_slice(&3u16.to_be_bytes());
+    iloc_content.extend_from_slice(&0u16.to_be_bytes());
+    iloc_content.extend_from_slice(&1u16.to_be_bytes());
+    iloc_content.extend_from_slice(&300u32.to_be_bytes());
+    iloc_content.extend_from_slice(&20u32.to_be_bytes());
+    let iloc = make_fullbox(b"iloc", 0, 0, &iloc_content);
+
+    let mut meta_inner = Vec::new();
+    meta_inner.extend_from_slice(&hdlr);
+    meta_inner.extend_from_slice(&iinf);
+    meta_inner.extend_from_slice(&iloc);
+    let meta = make_fullbox(b"meta", 0, 0, &meta_inner);
+    heic.extend_from_slice(&meta);
+
+    heic.extend_from_slice(&make_box(b"mdat", b"fake image data with EXIF and XMP"));
+
+    heic
+}
+
+#[test]
+fn test_heic_format_detection() {
+    let input = create_minimal_heic();
+    let format = detect_format(&input).unwrap();
+    assert_eq!(format, FileFormat::Heic);
+}
+
+#[test]
+fn test_heic_strip_removes_metadata() {
+    let input = create_heic_with_metadata();
+    let output = strip_metadata(&input).unwrap();
+    assert!(output.len() < input.len(), "output should be smaller after stripping metadata");
+    assert_eq!(&output[4..8], b"ftyp");
+    assert!(output.windows(4).any(|w| w == b"mdat"));
+}
+
+#[test]
+fn test_heic_image_data_preserved() {
+    let input = create_minimal_heic();
+    let output = strip_metadata(&input).unwrap();
+    assert!(output.windows(4).any(|w| w == b"mdat"));
+}
