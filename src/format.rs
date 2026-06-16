@@ -29,9 +29,22 @@ pub fn detect_format(bytes: &[u8]) -> crate::Result<FileFormat> {
         return Ok(FileFormat::Pdf);
     }
 
-    // MP4/MOV: box size (4 bytes) + "ftyp" (4 bytes)
-    // Both .mp4 and .mov use the same ISOBMFF container format
+    // ISOBMFF container: box size (4 bytes) + "ftyp" (4 bytes)
+    // Distinguish HEIC from MP4 by inspecting major/compatible brands
     if bytes.len() >= 8 && &bytes[4..8] == b"ftyp" {
+        let ftyp_size = u32::from_be_bytes(bytes[0..4].try_into().unwrap()) as usize;
+        if ftyp_size >= 12 && bytes.len() >= ftyp_size {
+            let major_brand = &bytes[8..12];
+            let has_heic = major_brand == b"heic"
+                || bytes[16..ftyp_size].chunks_exact(4).any(|b| b == b"heic");
+
+            if has_heic {
+                #[cfg(feature = "heic")]
+                return Ok(FileFormat::Heic);
+                #[cfg(not(feature = "heic"))]
+                return Err(Error::UnsupportedFormat);
+            }
+        }
         #[cfg(feature = "video")]
         return Ok(FileFormat::Mp4);
         #[cfg(not(feature = "video"))]
