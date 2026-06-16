@@ -99,7 +99,7 @@ fn process_meta_box(meta_data: &[u8], options: &RemovalOptions) -> crate::Result
     }
 
     // If nothing to remove, return as-is
-    if removed_ids.is_empty() {
+    if removed_ids.is_empty() && !options.icc_profile {
         return Ok(meta_data.to_vec());
     }
 
@@ -127,6 +127,15 @@ fn process_meta_box(meta_data: &[u8], options: &RemovalOptions) -> crate::Result
                 let rebuilt = rebuild_iloc(box_content, &removed_ids)?;
                 result.extend_from_slice(box_header_bytes);
                 result.extend_from_slice(&rebuilt);
+            }
+            b"iprp" => {
+                if options.icc_profile {
+                    let cleaned = process_iprp(box_content)?;
+                    result.extend_from_slice(box_header_bytes);
+                    result.extend_from_slice(&cleaned);
+                } else {
+                    result.extend_from_slice(&meta_data[4 + inner_start..4 + inner_end]);
+                }
             }
             _ => {
                 result.extend_from_slice(&meta_data[4 + inner_start..4 + inner_end]);
@@ -409,6 +418,155 @@ fn rebuild_iloc(iloc_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>>
     Ok(result)
 }
 
+fn process_iprp(iprp_data: &[u8]) -> crate::Result<Vec<u8>> {
+    let mut cursor = Cursor::new(iprp_data);
+    let mut colr_property_index: Option<u8> = None;
+
+    // First pass: find colr box index in ipco
+    while let Some((total_size, header_size, box_type)) = read_box_header(&mut cursor) {
+        let data_start = cursor.position() as usize;
+        let box_end = data_start + total_size - header_size;
+
+        if box_end > iprp_data.len() {
+            break;
+        }
+
+        if &box_type == b"ipco" {
+            let ipco_data = &iprp_data[data_start..box_end];
+            let mut ipco_cursor = Cursor::new(ipco_data);
+            let mut idx: u8 = 1;
+            while let Some((ipco_total, ipco_header, ipco_type)) = read_box_header(&mut ipco_cursor) {
+                if &ipco_type == b"colr" {
+                    colr_property_index = Some(idx);
+                    break;
+                }
+                let ipco_end = ipco_cursor.position() as usize + ipco_total - ipco_header;
+                if ipco_end > ipco_data.len() {
+                    break;
+                }
+                idx += 1;
+                ipco_cursor.set_position(ipco_end as u64);
+            }
+        }
+
+        cursor.set_position(box_end as u64);
+    }
+
+    let colr_idx = match colr_property_index {
+        Some(i) => i,
+        None => return Ok(iprp_data.to_vec()),
+    };
+
+    // Second pass: rebuild iprp
+    let mut result = Vec::with_capacity(iprp_data.len());
+    cursor.set_position(0);
+
+    while let Some((total_size, header_size, box_type)) = read_box_header(&mut cursor) {
+        let box_start = cursor.position() as usize - header_size;
+        let data_start = cursor.position() as usize;
+        let box_end = box_start + total_size;
+
+        if box_end > iprp_data.len() {
+            break;
+        }
+
+        match &box_type {
+            b"ipco" => {
+                let ipco_data = &iprp_data[data_start..box_end];
+                let cleaned = rebuild_ipco(ipco_data, colr_idx)?;
+                result.extend_from_slice(&iprp_data[box_start..box_start + header_size]);
+                result.extend_from_slice(&cleaned);
+            }
+            b"ipma" => {
+                let ipma_data = &iprp_data[data_start..box_end];
+                let cleaned = rebuild_ipma(ipma_data, colr_idx)?;
+                result.extend_from_slice(&iprp_data[box_start..box_start + header_size]);
+                result.extend_from_slice(&cleaned);
+            }
+            _ => {
+                result.extend_from_slice(&iprp_data[box_start..box_end]);
+            }
+        }
+
+        cursor.set_position(box_end as u64);
+    }
+
+    Ok(result)
+}
+
+fn rebuild_ipco(ipco_data: &[u8], colr_index: u8) -> crate::Result<Vec<u8>> {
+    let mut result = Vec::with_capacity(ipco_data.len());
+    let mut cursor = Cursor::new(ipco_data);
+    let mut idx: u8 = 1;
+
+    while let Some((total_size, header_size, _box_type)) = read_box_header(&mut cursor) {
+        let box_start = cursor.position() as usize - header_size;
+        let box_end = box_start + total_size;
+
+        if box_end > ipco_data.len() {
+            break;
+        }
+
+        if idx != colr_index {
+            result.extend_from_slice(&ipco_data[box_start..box_end]);
+        }
+        idx += 1;
+        cursor.set_position(box_end as u64);
+    }
+
+    Ok(result)
+}
+
+fn rebuild_ipma(ipma_data: &[u8], colr_index: u8) -> crate::Result<Vec<u8>> {
+    if ipma_data.len() < 8 {
+        return Ok(ipma_data.to_vec());
+    }
+    let version = ipma_data[0];
+    let flags = u32::from_be_bytes([0, ipma_data[1], ipma_data[2], ipma_data[3]]);
+    let entry_count = u32::from_be_bytes(ipma_data[4..8].try_into().unwrap()) as usize;
+
+    let mut result = Vec::with_capacity(ipma_data.len());
+    let vf = ((version as u32) << 24) | flags;
+    result.extend_from_slice(&vf.to_be_bytes());
+    result.extend_from_slice(&entry_count.to_be_bytes());
+
+    let mut pos = 8;
+    for _ in 0..entry_count {
+        let item_id_size = if version < 1 { 2usize } else { 4 };
+        if pos + item_id_size > ipma_data.len() {
+            break;
+        }
+        result.extend_from_slice(&ipma_data[pos..pos + item_id_size]);
+        pos += item_id_size;
+
+        if pos + 1 > ipma_data.len() {
+            break;
+        }
+        let association_count = ipma_data[pos] as usize;
+        result.push(ipma_data[pos]);
+        pos += 1;
+
+        for _ in 0..association_count {
+            let assoc_size = if version < 1 { 1 } else { 2 };
+            if pos + assoc_size > ipma_data.len() {
+                break;
+            }
+            let property_index: u16 = if version < 1 {
+                (ipma_data[pos] & 0x7F) as u16
+            } else {
+                u16::from_be_bytes([ipma_data[pos], ipma_data[pos + 1]]) & 0x7FFF
+            };
+
+            if property_index != colr_index as u16 {
+                result.extend_from_slice(&ipma_data[pos..pos + assoc_size]);
+            }
+            pos += assoc_size;
+        }
+    }
+
+    Ok(result)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -632,5 +790,125 @@ mod tests {
         // mdat should be preserved
         let mdat_pos = output.windows(4).position(|w| w == b"mdat").unwrap();
         assert_eq!(&output[mdat_pos..mdat_pos + 4], b"mdat");
+    }
+
+    fn create_heic_with_icc() -> Vec<u8> {
+        let mut heic = Vec::new();
+        let mut ftyp_content = b"heic".to_vec();
+        ftyp_content.extend_from_slice(&0u32.to_be_bytes());
+        heic.extend_from_slice(&make_box(b"ftyp", &ftyp_content));
+
+        let mut hdlr_content = Vec::new();
+        hdlr_content.extend_from_slice(&0u32.to_be_bytes());
+        hdlr_content.extend_from_slice(b"pict");
+        hdlr_content.extend_from_slice(&[0u8; 12]);
+        hdlr_content.push(0);
+        let hdlr = make_fullbox(b"hdlr", 0, 0, &hdlr_content);
+
+        let mut iinf_entries = Vec::new();
+        let mut infe1 = Vec::new();
+        infe1.extend_from_slice(&1u16.to_be_bytes());
+        infe1.extend_from_slice(&0u16.to_be_bytes());
+        infe1.extend_from_slice(b"hvc1");
+        infe1.push(0);
+        iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe1));
+
+        let mut iinf_content = Vec::new();
+        iinf_content.extend_from_slice(&1u16.to_be_bytes());
+        iinf_content.extend_from_slice(&iinf_entries);
+        let iinf = make_fullbox(b"iinf", 0, 0, &iinf_content);
+
+        let mut iloc_content = Vec::new();
+        iloc_content.push(0x44);
+        iloc_content.push(0x00);
+        iloc_content.extend_from_slice(&1u16.to_be_bytes());
+        iloc_content.extend_from_slice(&1u16.to_be_bytes());
+        iloc_content.extend_from_slice(&0u16.to_be_bytes());
+        iloc_content.extend_from_slice(&1u16.to_be_bytes());
+        iloc_content.extend_from_slice(&100u32.to_be_bytes());
+        iloc_content.extend_from_slice(&20u32.to_be_bytes());
+        let iloc = make_fullbox(b"iloc", 0, 0, &iloc_content);
+
+        // iprp with ipco (ispe + colr) and ipma
+        let ispe = make_box(b"ispe", &[0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01]);
+        let colr = make_box(b"colr", b"nclx\x01\x01\x01\x00");
+        let mut ipco_content = Vec::new();
+        ipco_content.extend_from_slice(&ispe);
+        ipco_content.extend_from_slice(&colr);
+        let ipco = make_box(b"ipco", &ipco_content);
+
+        // ipma (v0): 1 entry, item_id=1, 2 associations [ispe(1), colr(2)]
+        let mut ipma_content = Vec::new();
+        ipma_content.extend_from_slice(&0u32.to_be_bytes()); // version=0, flags=0
+        ipma_content.extend_from_slice(&1u32.to_be_bytes()); // entry_count
+        ipma_content.extend_from_slice(&1u16.to_be_bytes()); // item_id
+        ipma_content.push(2u8); // association_count
+        ipma_content.push(0x81); // essential=1, property_index=1 (ispe)
+        ipma_content.push(0x82); // essential=1, property_index=2 (colr)
+        let ipma = make_box(b"ipma", &ipma_content);
+
+        let mut iprp_content = Vec::new();
+        iprp_content.extend_from_slice(&ipco);
+        iprp_content.extend_from_slice(&ipma);
+        let iprp = make_box(b"iprp", &iprp_content);
+
+        let mut meta_inner = Vec::new();
+        meta_inner.extend_from_slice(&hdlr);
+        meta_inner.extend_from_slice(&iinf);
+        meta_inner.extend_from_slice(&iloc);
+        meta_inner.extend_from_slice(&iprp);
+        let meta = make_fullbox(b"meta", 0, 0, &meta_inner);
+        heic.extend_from_slice(&meta);
+
+        heic.extend_from_slice(&make_box(b"mdat", b"fake image data"));
+        heic
+    }
+
+    #[test]
+    fn test_heic_strip_icc() {
+        let input = create_heic_with_icc();
+        let options = RemovalOptions { icc_profile: true, ..RemovalOptions::default() };
+        let output = HeicRemover.remove_metadata(&input, &options).unwrap();
+        assert!(!output.windows(4).any(|w| w == b"colr"), "colr should be removed when icc_profile option is set");
+        assert!(output.windows(4).any(|w| w == b"ispe"), "ispe should be preserved");
+        assert_eq!(&output[4..8], b"ftyp");
+        assert!(output.windows(4).any(|w| w == b"mdat"));
+    }
+
+    #[test]
+    fn test_heic_keep_icc_by_default() {
+        let input = create_heic_with_icc();
+        let output = HeicRemover.remove_metadata(&input, &RemovalOptions::default()).unwrap();
+        assert!(output.windows(4).any(|w| w == b"colr"), "colr should be preserved by default");
+    }
+
+    #[test]
+    fn test_heic_invalid_header() {
+        let input = b"not a heic file at all".to_vec();
+        let result = HeicRemover.remove_metadata(&input, &RemovalOptions::default());
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_heic_missing_meta_box() {
+        let mut heic = Vec::new();
+        let mut ftyp_content = b"heic".to_vec();
+        ftyp_content.extend_from_slice(&0u32.to_be_bytes());
+        heic.extend_from_slice(&make_box(b"ftyp", &ftyp_content));
+        heic.extend_from_slice(&make_box(b"mdat", b"fake image data"));
+        let result = HeicRemover.remove_metadata(&heic, &RemovalOptions::default());
+        assert!(result.is_err(), "HEIC without meta box should error");
+    }
+
+    #[test]
+    fn test_heic_truncated_data() {
+        let mut heic = Vec::new();
+        let mut ftyp_content = b"heic".to_vec();
+        ftyp_content.extend_from_slice(&0u32.to_be_bytes());
+        heic.extend_from_slice(&make_box(b"ftyp", &ftyp_content));
+        heic.extend_from_slice(&50u32.to_be_bytes());
+        heic.extend_from_slice(b"meta");
+        let result = HeicRemover.remove_metadata(&heic, &RemovalOptions::default());
+        assert!(result.is_err(), "truncated HEIC should error");
     }
 }
