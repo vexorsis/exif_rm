@@ -39,8 +39,9 @@ impl MetadataRemover for HeicRemover {
                 b"meta" => {
                     found_meta = true;
                     let meta_content = &input[box_start + header_size..box_end];
+                    let original_meta_size = total_size;
 
-                    let processed = process_meta_box(meta_content, options)?;
+                    let processed = process_meta_box(meta_content, original_meta_size, header_size, options)?;
                     // Write meta box header with correct size for the (possibly smaller) content
                     let new_size = (header_size + processed.len()) as u32;
                     output.extend_from_slice(&new_size.to_be_bytes());
@@ -69,7 +70,14 @@ impl MetadataRemover for HeicRemover {
 
 /// Process the content inside a meta box (after the box header).
 /// The content starts with version+flags (4 bytes for a fullbox), then inner boxes.
-fn process_meta_box(meta_data: &[u8], options: &RemovalOptions) -> crate::Result<Vec<u8>> {
+/// `original_meta_total` is the original meta box total size (header + content).
+/// `meta_header_size` is the box header size (8 or 16 for extended size).
+fn process_meta_box(
+    meta_data: &[u8],
+    original_meta_total: usize,
+    meta_header_size: usize,
+    options: &RemovalOptions,
+) -> crate::Result<Vec<u8>> {
     // meta is a fullbox: first 4 bytes are version(1) + flags(3)
     if meta_data.len() < 4 {
         return Err(Error::InvalidData("HEIC: meta box too short".into()));
@@ -104,6 +112,7 @@ fn process_meta_box(meta_data: &[u8], options: &RemovalOptions) -> crate::Result
 
     // Second pass: rebuild meta box contents, filtering iinf and iloc
     let mut result = version_flags.to_vec();
+    let mut iloc_result_range: Option<(usize, usize)> = None; // track where iloc ends up in result
     cursor.set_position(0);
     while let Some((total_size, header_size, box_type)) = read_box_header(&mut cursor) {
         let inner_start = cursor.position() as usize - header_size;
@@ -127,9 +136,23 @@ fn process_meta_box(meta_data: &[u8], options: &RemovalOptions) -> crate::Result
             b"iloc" => {
                 let rebuilt = rebuild_iloc(box_content, &removed_ids)?;
                 let new_size = (header_size + rebuilt.len()) as u32;
+                let iloc_start = result.len();
                 result.extend_from_slice(&new_size.to_be_bytes());
                 result.extend_from_slice(&box_type);
                 result.extend_from_slice(&rebuilt);
+                let iloc_end = result.len();
+                iloc_result_range = Some((iloc_start, iloc_end));
+            }
+            b"iref" => {
+                let rebuilt = rebuild_iref(box_content, &removed_ids)?;
+                if rebuilt.is_empty() {
+                    // All references were removed; omit the entire iref box
+                } else {
+                    let new_size = (header_size + rebuilt.len()) as u32;
+                    result.extend_from_slice(&new_size.to_be_bytes());
+                    result.extend_from_slice(&box_type);
+                    result.extend_from_slice(&rebuilt);
+                }
             }
             b"iprp" => {
                 if options.icc_profile {
@@ -148,6 +171,17 @@ fn process_meta_box(meta_data: &[u8], options: &RemovalOptions) -> crate::Result
         }
 
         cursor.set_position(inner_end as u64);
+    }
+
+    // Adjust iloc extent offsets for construction_method=0 items.
+    // When the meta box shrinks, the mdat box moves earlier, making all absolute
+    // file offsets in iloc stale. We need to shift them by the delta.
+    let new_meta_total = meta_header_size + result.len();
+    if new_meta_total != original_meta_total {
+        let offset_delta = original_meta_total as i64 - new_meta_total as i64;
+        if let Some((iloc_start, iloc_end)) = iloc_result_range {
+            adjust_iloc_offsets(&mut result[iloc_start..iloc_end], offset_delta)?;
+        }
     }
 
     Ok(result)
@@ -190,7 +224,7 @@ fn find_metadata_item_ids(iinf_data: &[u8], options: &RemovalOptions) -> Vec<u16
         }
 
         let infe_data = &iinf_data[offset..offset + infe_size];
-        let infe_version = infe_data[8];
+        let _infe_version = infe_data[8];
 
         // item_id size depends on iinf_version, not infe_version
         // After fullbox header (12 bytes): item_id(item_id_size) + protection_index(2) + item_type(4)
@@ -303,6 +337,7 @@ fn is_infe_removed(infe_data: &[u8], removed_ids: &[u16], item_id_size: usize) -
 
 /// Rebuild iloc box content (after the box header), excluding removed items.
 /// The content starts with version(1) + flags(3) + size fields + item_count.
+/// `offset_delta` adjusts extent offsets for construction_method=0 items.
 fn rebuild_iloc(iloc_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>> {
     if iloc_data.len() < 8 {
         return Err(Error::InvalidData("HEIC: iloc box too short".into()));
@@ -413,6 +448,197 @@ fn rebuild_iloc(iloc_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>>
     }
 
     Ok(result)
+}
+
+/// Adjust iloc extent offsets in-place for construction_method=0 items.
+/// `iloc_box` is the full iloc box including the box header (size + type).
+/// When the meta box shrinks, the mdat box shifts earlier in the file, so all
+/// absolute file offsets (construction_method=0) become stale and must be shifted
+/// by `offset_delta` (positive = offsets need to decrease).
+fn adjust_iloc_offsets(iloc_box: &mut [u8], offset_delta: i64) -> crate::Result<()> {
+    if offset_delta == 0 {
+        return Ok(());
+    }
+
+    // iloc box: [size(4)][type(4)][version(1)][flags(3)][offset_size|length_size(1)][base_offset_size|index_size(1)][item_count...]
+    if iloc_box.len() < 14 {
+        return Ok(());
+    }
+
+    let version = iloc_box[8];
+    if version > 1 {
+        return Ok(());
+    }
+
+    let offset_size = (iloc_box[12] >> 4) as usize;
+    let length_size = (iloc_box[12] & 0x0F) as usize;
+    let base_offset_size = (iloc_box[13] >> 4) as usize;
+    let index_size = if version == 1 { (iloc_box[13] & 0x0F) as usize } else { 0 };
+
+    let item_count_size = if version < 2 { 2 } else { 4 };
+    let mut pos = 14 + item_count_size; // after box header + fullbox header + size fields + item_count
+
+    if pos > iloc_box.len() {
+        return Ok(());
+    }
+
+    let item_count = if version < 2 {
+        u16::from_be_bytes([iloc_box[14], iloc_box[15]]) as usize
+    } else {
+        u32::from_be_bytes([iloc_box[14], iloc_box[15], iloc_box[16], iloc_box[17]]) as usize
+    };
+
+    for _ in 0..item_count {
+        if pos + 2 > iloc_box.len() {
+            break;
+        }
+
+        let construction_method = if version >= 1 {
+            if pos + 4 > iloc_box.len() {
+                break;
+            }
+            let cm = u16::from_be_bytes([iloc_box[pos + 2], iloc_box[pos + 3]]) & 0xF;
+            pos += 4; // item_id(2) + construction_method(2)
+            cm
+        } else {
+            pos += 2; // item_id(2)
+            0
+        };
+
+        if pos + 2 > iloc_box.len() {
+            break;
+        }
+        pos += 2; // data_reference_index
+
+        // Adjust base_offset if present
+        if base_offset_size > 0 {
+            adjust_offset_field(iloc_box, pos, base_offset_size, offset_delta, construction_method == 0)?;
+            pos += base_offset_size;
+        }
+
+        if pos + 2 > iloc_box.len() {
+            break;
+        }
+        let extent_count = u16::from_be_bytes([iloc_box[pos], iloc_box[pos + 1]]) as usize;
+        pos += 2; // extent_count
+
+        for _ in 0..extent_count {
+            if version >= 1 && index_size > 0 {
+                pos += index_size; // extent_index
+            }
+
+            // Adjust extent_offset for construction_method=0 (file offsets)
+            if offset_size > 0 {
+                adjust_offset_field(iloc_box, pos, offset_size, offset_delta, construction_method == 0)?;
+                pos += offset_size;
+            }
+
+            pos += length_size; // extent_length (not adjusted)
+        }
+    }
+
+    Ok(())
+}
+
+/// Adjust a multi-byte offset field in-place. Only applies the adjustment if `should_adjust` is true
+/// (i.e., construction_method == 0, meaning the offset is an absolute file position).
+fn adjust_offset_field(buf: &mut [u8], pos: usize, field_size: usize, delta: i64, should_adjust: bool) -> crate::Result<()> {
+    if !should_adjust || delta == 0 {
+        return Ok(());
+    }
+
+    match field_size {
+        4 => {
+            if pos + 4 > buf.len() {
+                return Ok(());
+            }
+            let old_val = u32::from_be_bytes([buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3]]) as i64;
+            let new_val = old_val - delta;
+            if new_val < 0 {
+                return Err(Error::InvalidData("HEIC: iloc offset underflow after adjustment".into()));
+            }
+            let bytes = (new_val as u32).to_be_bytes();
+            buf[pos..pos + 4].copy_from_slice(&bytes);
+        }
+        8 => {
+            if pos + 8 > buf.len() {
+                return Ok(());
+            }
+            let old_val = u64::from_be_bytes([
+                buf[pos], buf[pos + 1], buf[pos + 2], buf[pos + 3],
+                buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7],
+            ]) as i64;
+            let new_val = old_val - delta;
+            if new_val < 0 {
+                return Err(Error::InvalidData("HEIC: iloc offset underflow after adjustment".into()));
+            }
+            let bytes = (new_val as u64).to_be_bytes();
+            buf[pos..pos + 8].copy_from_slice(&bytes);
+        }
+        _ => {}
+    }
+
+    Ok(())
+}
+
+/// Rebuild iref box content (after the box header), removing entries whose
+/// from_item_id is in removed_ids. The content is a fullbox: version(1) + flags(3),
+/// then a sequence of reference entries, each being a box with:
+///   size(4) + reference_type(4) + from_item_id(2 for v0, 4 for v1+) +
+///   reference_count(2) + to_item_ids(2 or 4 each).
+/// Returns empty Vec if all references are removed (caller should omit the box).
+fn rebuild_iref(iref_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>> {
+    if iref_data.len() < 4 {
+        return Err(Error::InvalidData("HEIC: iref box too short".into()));
+    }
+
+    let version = iref_data[0];
+    let flags = &iref_data[1..4];
+    let from_id_size: usize = if version == 0 { 2 } else { 4 };
+    let _to_id_size: usize = if version == 0 { 2 } else { 4 };
+
+    let mut result = vec![version];
+    result.extend_from_slice(flags);
+
+    let mut offset = 4;
+    let mut any_kept = false;
+
+    while offset + 8 <= iref_data.len() {
+        let entry_size = u32::from_be_bytes(iref_data[offset..offset + 4].try_into().unwrap()) as usize;
+        let _ref_type = &iref_data[offset + 4..offset + 8];
+
+        if entry_size < 8 + from_id_size + 2 || offset + entry_size > iref_data.len() {
+            break;
+        }
+
+        let from_id_pos = offset + 8;
+        let from_id = if from_id_size == 2 {
+            u16::from_be_bytes([iref_data[from_id_pos], iref_data[from_id_pos + 1]])
+        } else {
+            u32::from_be_bytes([
+                iref_data[from_id_pos],
+                iref_data[from_id_pos + 1],
+                iref_data[from_id_pos + 2],
+                iref_data[from_id_pos + 3],
+            ]) as u16
+        };
+
+        if removed_ids.contains(&from_id) {
+            offset += entry_size;
+            continue;
+        }
+
+        // Keep this reference entry
+        result.extend_from_slice(&iref_data[offset..offset + entry_size]);
+        any_kept = true;
+        offset += entry_size;
+    }
+
+    if any_kept {
+        Ok(result)
+    } else {
+        Ok(Vec::new())
+    }
 }
 
 fn process_iprp(iprp_data: &[u8]) -> crate::Result<Vec<u8>> {
@@ -911,6 +1137,85 @@ mod tests {
         heic.extend_from_slice(b"meta");
         let result = HeicRemover.remove_metadata(&heic, &RemovalOptions::default());
         assert!(result.is_err(), "truncated HEIC should error");
+    }
+
+    #[test]
+    fn test_heic_strip_iref_orphaned_references() {
+        // Build a HEIC with Exif item (id=1), hvc1 item (id=2), and an iref with
+        // cdsc from Exif(1)->hvc1(2). After stripping, the cdsc reference should be removed.
+        let mut heic = Vec::new();
+
+        // ftyp
+        let mut ftyp_content = b"heic".to_vec();
+        ftyp_content.extend_from_slice(&0u32.to_be_bytes());
+        heic.extend_from_slice(&make_box(b"ftyp", &ftyp_content));
+
+        let mut meta_inner = Vec::new();
+
+        // hdlr
+        let mut hdlr_content = Vec::new();
+        hdlr_content.extend_from_slice(&0u32.to_be_bytes());
+        hdlr_content.extend_from_slice(b"pict");
+        hdlr_content.extend_from_slice(&[0u8; 12]);
+        hdlr_content.push(0);
+        meta_inner.extend_from_slice(&make_fullbox(b"hdlr", 0, 0, &hdlr_content));
+
+        // iinf: Exif(id=1) + hvc1(id=2)
+        let mut iinf_entries = Vec::new();
+        let mut infe1_content = Vec::new();
+        infe1_content.extend_from_slice(&1u16.to_be_bytes());
+        infe1_content.extend_from_slice(&0u16.to_be_bytes());
+        infe1_content.extend_from_slice(b"Exif");
+        infe1_content.push(0);
+        iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe1_content));
+
+        let mut infe2_content = Vec::new();
+        infe2_content.extend_from_slice(&2u16.to_be_bytes());
+        infe2_content.extend_from_slice(&0u16.to_be_bytes());
+        infe2_content.extend_from_slice(b"hvc1");
+        infe2_content.push(0);
+        iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe2_content));
+
+        let mut iinf_content = (2u16).to_be_bytes().to_vec();
+        iinf_content.extend_from_slice(&iinf_entries);
+        meta_inner.extend_from_slice(&make_fullbox(b"iinf", 0, 0, &iinf_content));
+
+        // iloc
+        let mut iloc_content = Vec::new();
+        iloc_content.push(0x00);
+        iloc_content.push(0x00);
+        iloc_content.extend_from_slice(&2u16.to_be_bytes());
+        iloc_content.extend_from_slice(&1u16.to_be_bytes());
+        iloc_content.extend_from_slice(&0u16.to_be_bytes());
+        iloc_content.extend_from_slice(&0u16.to_be_bytes());
+        iloc_content.extend_from_slice(&2u16.to_be_bytes());
+        iloc_content.extend_from_slice(&0u16.to_be_bytes());
+        iloc_content.extend_from_slice(&0u16.to_be_bytes());
+        meta_inner.extend_from_slice(&make_fullbox(b"iloc", 0, 0, &iloc_content));
+
+        // iref: cdsc from Exif(1) -> hvc1(2)
+        let mut iref_entry = Vec::new();
+        iref_entry.extend_from_slice(b"cdsc"); // reference_type
+        iref_entry.extend_from_slice(&1u16.to_be_bytes()); // from_item_id
+        iref_entry.extend_from_slice(&1u16.to_be_bytes()); // reference_count
+        iref_entry.extend_from_slice(&2u16.to_be_bytes()); // to_item_id
+        let iref_entry_size = (8 + iref_entry.len()) as u32;
+        let mut iref_entry_box = iref_entry_size.to_be_bytes().to_vec();
+        iref_entry_box.extend_from_slice(&iref_entry);
+        meta_inner.extend_from_slice(&make_fullbox(b"iref", 0, 0, &iref_entry_box));
+
+        heic.extend_from_slice(&make_fullbox(b"meta", 0, 0, &meta_inner));
+        heic.extend_from_slice(&make_box(b"mdat", b"fake image data"));
+
+        let output = HeicRemover.remove_metadata(&heic, &RemovalOptions::default()).unwrap();
+
+        // The iref box should be completely absent (all references were from removed items)
+        // or have no cdsc entries. Check that "cdsc" doesn't appear in output.
+        assert!(!output.windows(4).any(|w| w == b"cdsc"),
+            "cdsc reference from removed Exif item should be gone");
+        // The hvc1 item should still be present
+        assert!(output.windows(4).any(|w| w == b"hvc1"),
+            "hvc1 item should still be present");
     }
 
     /// Verify that all box sizes in the output are internally consistent.

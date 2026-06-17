@@ -66,8 +66,8 @@ HEIC uses ISOBMFF's item-based model. Metadata lives as "items" referenced by `i
 
 1. Parse top-level boxes — walk ISOBMFF structure looking for `meta`
 2. Parse `iinf` — identify items with type `Exif` or `mime` (XMP). Record their item IDs.
-3. Rebuild `iinf` — exclude metadata items.
-4. Rebuild `iloc` — exclude extents for metadata item IDs.
+3. Rebuild `iinf` — exclude metadata items; update `entry_count` in the `iinf` header to reflect the new item count.
+4. Rebuild `iloc` — exclude extents for metadata item IDs; update `item_count` in the `iloc` header.
 5. Process `iprp`/`ipco`/`ipma` — if `options.icc_profile`, find and remove `colr` from `ipco` and its association from `ipma`.
 6. Pass through all other top-level boxes unchanged (`ftyp`, `mdat`, etc.).
 
