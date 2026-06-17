@@ -1,6 +1,7 @@
 use crate::error::Error;
 use crate::remove::isobmff::read_box_header;
 use crate::traits::{FileFormat, MetadataRemover, RemovalOptions};
+use std::collections::HashSet;
 use std::io::Cursor;
 
 pub struct HeicRemover;
@@ -86,7 +87,7 @@ fn process_meta_box(
     let version_flags = &meta_data[0..4];
 
     // First pass: find metadata item IDs from iinf
-    let mut removed_ids: Vec<u16> = Vec::new();
+    let mut removed_ids: HashSet<u16> = HashSet::new();
     let mut cursor = Cursor::new(&meta_data[4..]);
     while let Some((total_size, header_size, box_type)) = read_box_header(&mut cursor) {
         let inner_start = cursor.position() as usize - header_size;
@@ -190,8 +191,8 @@ fn process_meta_box(
 /// Find metadata item IDs from iinf box content (after the box header, i.e., fullbox content).
 /// The content starts with version(1) + flags(3) + entry_count.
 /// item_id width in infe entries depends on iinf version: 2 bytes for v0, 4 bytes for v1+.
-fn find_metadata_item_ids(iinf_data: &[u8], options: &RemovalOptions) -> Vec<u16> {
-    let mut ids = Vec::new();
+fn find_metadata_item_ids(iinf_data: &[u8], options: &RemovalOptions) -> HashSet<u16> {
+    let mut ids = HashSet::new();
 
     if iinf_data.len() < 6 {
         return ids;
@@ -246,7 +247,7 @@ fn find_metadata_item_ids(iinf_data: &[u8], options: &RemovalOptions) -> Vec<u16
             || (options.xmp && item_type == b"mime");
 
         if should_remove {
-            ids.push(item_id);
+            ids.insert(item_id);
         }
 
         offset += infe_size;
@@ -257,7 +258,7 @@ fn find_metadata_item_ids(iinf_data: &[u8], options: &RemovalOptions) -> Vec<u16
 
 /// Rebuild iinf box content (after the box header), excluding removed items.
 /// The content starts with version(1) + flags(3) + entry_count.
-fn rebuild_iinf(iinf_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>> {
+fn rebuild_iinf(iinf_data: &[u8], removed_ids: &HashSet<u16>) -> crate::Result<Vec<u8>> {
     if iinf_data.len() < 6 {
         return Err(Error::InvalidData("HEIC: iinf box too short".into()));
     }
@@ -321,7 +322,7 @@ fn rebuild_iinf(iinf_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>>
 
 /// Check if an infe entry's item_id is in the removed_ids list.
 /// item_id_size depends on the parent iinf version: 2 for v0, 4 for v1+.
-fn is_infe_removed(infe_data: &[u8], removed_ids: &[u16], item_id_size: usize) -> bool {
+fn is_infe_removed(infe_data: &[u8], removed_ids: &HashSet<u16>, item_id_size: usize) -> bool {
     if infe_data.len() < 12 + item_id_size {
         return false;
     }
@@ -337,8 +338,9 @@ fn is_infe_removed(infe_data: &[u8], removed_ids: &[u16], item_id_size: usize) -
 
 /// Rebuild iloc box content (after the box header), excluding removed items.
 /// The content starts with version(1) + flags(3) + size fields + item_count.
-/// `offset_delta` adjusts extent offsets for construction_method=0 items.
-fn rebuild_iloc(iloc_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>> {
+/// After rebuilding, `adjust_iloc_offsets` must be called to shift construction_method=0
+/// extent offsets by the meta box shrinkage delta.
+fn rebuild_iloc(iloc_data: &[u8], removed_ids: &HashSet<u16>) -> crate::Result<Vec<u8>> {
     if iloc_data.len() < 8 {
         return Err(Error::InvalidData("HEIC: iloc box too short".into()));
     }
@@ -587,7 +589,7 @@ fn adjust_offset_field(buf: &mut [u8], pos: usize, field_size: usize, delta: i64
 ///   size(4) + reference_type(4) + from_item_id(2 for v0, 4 for v1+) +
 ///   reference_count(2) + to_item_ids(2 or 4 each).
 /// Returns empty Vec if all references are removed (caller should omit the box).
-fn rebuild_iref(iref_data: &[u8], removed_ids: &[u16]) -> crate::Result<Vec<u8>> {
+fn rebuild_iref(iref_data: &[u8], removed_ids: &HashSet<u16>) -> crate::Result<Vec<u8>> {
     if iref_data.len() < 4 {
         return Err(Error::InvalidData("HEIC: iref box too short".into()));
     }
@@ -1216,6 +1218,325 @@ mod tests {
         // The hvc1 item should still be present
         assert!(output.windows(4).any(|w| w == b"hvc1"),
             "hvc1 item should still be present");
+    }
+
+    /// Create a HEIC with iloc v1, construction_method=0, real offset/length sizes (4/4).
+    /// Contains: hvc1 (id=1) + Exif (id=2) + hvc1 (id=3).
+    /// The iloc offsets point into an mdat box that follows the meta box.
+    fn create_heic_with_iloc_v1_offsets() -> Vec<u8> {
+        let mut heic = Vec::new();
+
+        // ftyp box (36 bytes: 8 header + 28 content)
+        let mut ftyp_content = b"heic".to_vec();
+        ftyp_content.extend_from_slice(&0u32.to_be_bytes());
+        ftyp_content.extend_from_slice(b"mif1");
+        heic.extend_from_slice(&make_box(b"ftyp", &ftyp_content));
+
+        // Build meta inner boxes
+        let mut meta_inner = Vec::new();
+
+        // hdlr
+        let mut hdlr_content = Vec::new();
+        hdlr_content.extend_from_slice(&0u32.to_be_bytes());
+        hdlr_content.extend_from_slice(b"pict");
+        hdlr_content.extend_from_slice(&[0u8; 12]);
+        hdlr_content.push(0);
+        meta_inner.extend_from_slice(&make_fullbox(b"hdlr", 0, 0, &hdlr_content));
+
+        // iinf with 3 items: hvc1(1), Exif(2), hvc1(3)
+        let mut iinf_entries = Vec::new();
+        // infe for hvc1 id=1
+        let mut infe1 = Vec::new();
+        infe1.extend_from_slice(&1u16.to_be_bytes());
+        infe1.extend_from_slice(&0u16.to_be_bytes());
+        infe1.extend_from_slice(b"hvc1");
+        infe1.push(0);
+        iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe1));
+        // infe for Exif id=2
+        let mut infe2 = Vec::new();
+        infe2.extend_from_slice(&2u16.to_be_bytes());
+        infe2.extend_from_slice(&0u16.to_be_bytes());
+        infe2.extend_from_slice(b"Exif");
+        infe2.push(0);
+        iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe2));
+        // infe for hvc1 id=3
+        let mut infe3 = Vec::new();
+        infe3.extend_from_slice(&3u16.to_be_bytes());
+        infe3.extend_from_slice(&0u16.to_be_bytes());
+        infe3.extend_from_slice(b"hvc1");
+        infe3.push(0);
+        iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe3));
+
+        let mut iinf_content = (3u16).to_be_bytes().to_vec();
+        iinf_content.extend_from_slice(&iinf_entries);
+        meta_inner.extend_from_slice(&make_fullbox(b"iinf", 0, 0, &iinf_content));
+
+        // iloc v1 with offset_size=4, length_size=4, base_offset_size=0, index_size=0
+        // 3 items, all construction_method=0 (file offsets)
+        // We'll use placeholder offsets; the test will verify they're adjusted correctly.
+        let mut iloc_content = Vec::new();
+        iloc_content.push(0x44); // offset_size=4, length_size=4
+        iloc_content.push(0x00); // base_offset_size=0, index_size=0
+        iloc_content.extend_from_slice(&3u16.to_be_bytes()); // item_count=3
+
+        // item 1 (hvc1): item_id=1, construction_method=0, data_ref=0, 1 extent
+        iloc_content.extend_from_slice(&1u16.to_be_bytes()); // item_id
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // construction_method=0
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc_content.extend_from_slice(&1u16.to_be_bytes()); // extent_count=1
+        iloc_content.extend_from_slice(&999u32.to_be_bytes()); // extent_offset (placeholder)
+        iloc_content.extend_from_slice(&100u32.to_be_bytes()); // extent_length
+
+        // item 2 (Exif): item_id=2, construction_method=0, data_ref=0, 1 extent
+        iloc_content.extend_from_slice(&2u16.to_be_bytes()); // item_id
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // construction_method=0
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc_content.extend_from_slice(&1u16.to_be_bytes()); // extent_count=1
+        iloc_content.extend_from_slice(&1200u32.to_be_bytes()); // extent_offset (placeholder)
+        iloc_content.extend_from_slice(&50u32.to_be_bytes()); // extent_length
+
+        // item 3 (hvc1): item_id=3, construction_method=0, data_ref=0, 1 extent
+        iloc_content.extend_from_slice(&3u16.to_be_bytes()); // item_id
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // construction_method=0
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc_content.extend_from_slice(&1u16.to_be_bytes()); // extent_count=1
+        iloc_content.extend_from_slice(&1300u32.to_be_bytes()); // extent_offset (placeholder)
+        iloc_content.extend_from_slice(&200u32.to_be_bytes()); // extent_length
+
+        meta_inner.extend_from_slice(&make_fullbox(b"iloc", 1, 0, &iloc_content));
+
+        // meta fullbox
+        heic.extend_from_slice(&make_fullbox(b"meta", 0, 0, &meta_inner));
+
+        // mdat box
+        heic.extend_from_slice(&make_box(b"mdat", b"fake image data that is long enough"));
+
+        heic
+    }
+
+    /// Extract extent offsets from an iloc v1 box in the output.
+    /// Returns vec of (item_id, construction_method, vec of (extent_offset, extent_length))
+    fn parse_iloc_offsets(data: &[u8]) -> Vec<(u16, u16, Vec<(u32, u32)>)> {
+        // Find iloc box
+        let pos = data.windows(4).position(|w| w == b"iloc").expect("iloc not found");
+        let iloc_start = pos - 4;
+        let iloc_size = u32::from_be_bytes(data[iloc_start..iloc_start + 4].try_into().unwrap()) as usize;
+        let _iloc_end = iloc_start + iloc_size;
+
+        // Skip box header (8) + fullbox header (4)
+        let version = data[iloc_start + 8];
+        let offset_size = (data[iloc_start + 12] >> 4) as usize;
+        let length_size = (data[iloc_start + 12] & 0x0F) as usize;
+        let base_offset_size = (data[iloc_start + 13] >> 4) as usize;
+        let index_size = if version >= 1 { (data[iloc_start + 13] & 0x0F) as usize } else { 0 };
+
+        let item_count_off = iloc_start + 14;
+        let item_count = u16::from_be_bytes(data[item_count_off..item_count_off + 2].try_into().unwrap()) as usize;
+
+        let mut pos = item_count_off + 2;
+        let mut items = Vec::new();
+
+        for _ in 0..item_count {
+            let item_id = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap());
+            pos += 2;
+            let construction_method = if version >= 1 {
+                let cm = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) & 0xF;
+                pos += 2;
+                cm
+            } else {
+                0
+            };
+            pos += 2; // data_reference_index
+            pos += base_offset_size; // base_offset
+            let extent_count = u16::from_be_bytes(data[pos..pos + 2].try_into().unwrap()) as usize;
+            pos += 2;
+            let mut extents = Vec::new();
+            for _ in 0..extent_count {
+                pos += index_size;
+                let ext_offset = if offset_size == 4 {
+                    let v = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    v
+                } else {
+                    pos += offset_size;
+                    0
+                };
+                let ext_length = if length_size == 4 {
+                    let v = u32::from_be_bytes(data[pos..pos + 4].try_into().unwrap());
+                    pos += 4;
+                    v
+                } else {
+                    pos += length_size;
+                    0
+                };
+                extents.push((ext_offset, ext_length));
+            }
+            items.push((item_id, construction_method, extents));
+        }
+        items
+    }
+
+    #[test]
+    fn test_heic_iloc_v1_offset_adjustment() {
+        let input = create_heic_with_iloc_v1_offsets();
+
+        // Parse original offsets
+        let orig_items = parse_iloc_offsets(&input);
+        let orig_item1_offset = orig_items.iter().find(|(id, _, _)| *id == 1).unwrap().2[0].0;
+        let orig_item3_offset = orig_items.iter().find(|(id, _, _)| *id == 3).unwrap().2[0].0;
+
+        // Strip EXIF (item 2 will be removed, meta box shrinks)
+        let output = HeicRemover.remove_metadata(&input, &RemovalOptions::default()).unwrap();
+
+        // Parse stripped offsets
+        let strip_items = parse_iloc_offsets(&output);
+
+        // Item 2 (Exif) should be gone
+        assert!(strip_items.iter().all(|(id, _, _)| *id != 2), "Exif item should be removed");
+
+        // Items 1 and 3 should still be present
+        let strip_item1 = strip_items.iter().find(|(id, _, _)| *id == 1).unwrap();
+        let strip_item3 = strip_items.iter().find(|(id, _, _)| *id == 3).unwrap();
+
+        // Both should be construction_method=0
+        assert_eq!(strip_item1.1, 0);
+        assert_eq!(strip_item3.1, 0);
+
+        // Offsets should be adjusted by exactly the meta box shrinkage
+        // Find original and stripped meta box sizes
+        let orig_meta_pos = input.windows(4).position(|w| w == b"meta").unwrap() - 4;
+        let orig_meta_size = u32::from_be_bytes(input[orig_meta_pos..orig_meta_pos + 4].try_into().unwrap()) as usize;
+        let strip_meta_pos = output.windows(4).position(|w| w == b"meta").unwrap() - 4;
+        let strip_meta_size = u32::from_be_bytes(output[strip_meta_pos..strip_meta_pos + 4].try_into().unwrap()) as usize;
+
+        let expected_delta = orig_meta_size - strip_meta_size;
+        assert!(expected_delta > 0, "meta should have shrunk");
+
+        let strip_item1_offset = strip_item1.2[0].0;
+        let strip_item3_offset = strip_item3.2[0].0;
+
+        assert_eq!(strip_item1_offset, orig_item1_offset - expected_delta as u32,
+            "item 1 offset should be adjusted by meta shrinkage");
+        assert_eq!(strip_item3_offset, orig_item3_offset - expected_delta as u32,
+            "item 3 offset should be adjusted by meta shrinkage");
+
+        // Lengths should be unchanged
+        let orig_item1_length = orig_items.iter().find(|(id, _, _)| *id == 1).unwrap().2[0].1;
+        let orig_item3_length = orig_items.iter().find(|(id, _, _)| *id == 3).unwrap().2[0].1;
+        assert_eq!(strip_item1.2[0].1, orig_item1_length, "item 1 length should be unchanged");
+        assert_eq!(strip_item3.2[0].1, orig_item3_length, "item 3 length should be unchanged");
+    }
+
+    /// Create a HEIC with iloc v1 containing both construction_method=0 (file offset)
+    /// and construction_method=1 (idat offset) items.
+    /// Items: hvc1 id=1 (cm=0), Exif id=2 (cm=0), hvc1 id=3 (cm=1).
+    fn create_heic_with_mixed_construction_methods() -> Vec<u8> {
+        let mut heic = Vec::new();
+
+        // ftyp
+        let mut ftyp_content = b"heic".to_vec();
+        ftyp_content.extend_from_slice(&0u32.to_be_bytes());
+        ftyp_content.extend_from_slice(b"mif1");
+        heic.extend_from_slice(&make_box(b"ftyp", &ftyp_content));
+
+        let mut meta_inner = Vec::new();
+
+        // hdlr
+        let mut hdlr_content = Vec::new();
+        hdlr_content.extend_from_slice(&0u32.to_be_bytes());
+        hdlr_content.extend_from_slice(b"pict");
+        hdlr_content.extend_from_slice(&[0u8; 12]);
+        hdlr_content.push(0);
+        meta_inner.extend_from_slice(&make_fullbox(b"hdlr", 0, 0, &hdlr_content));
+
+        // iinf: hvc1(1), Exif(2), hvc1(3)
+        let mut iinf_entries = Vec::new();
+        for (id, item_type) in [(1u16, b"hvc1"), (2u16, b"Exif"), (3u16, b"hvc1")] {
+            let mut infe = Vec::new();
+            infe.extend_from_slice(&id.to_be_bytes());
+            infe.extend_from_slice(&0u16.to_be_bytes());
+            infe.extend_from_slice(item_type);
+            infe.push(0);
+            iinf_entries.extend_from_slice(&make_fullbox(b"infe", 0, 0, &infe));
+        }
+        let mut iinf_content = (3u16).to_be_bytes().to_vec();
+        iinf_content.extend_from_slice(&iinf_entries);
+        meta_inner.extend_from_slice(&make_fullbox(b"iinf", 0, 0, &iinf_content));
+
+        // iloc v1: offset_size=4, length_size=4, base_offset_size=0, index_size=0
+        let mut iloc_content = Vec::new();
+        iloc_content.push(0x44); // offset_size=4, length_size=4
+        iloc_content.push(0x00); // base_offset_size=0, index_size=0
+        iloc_content.extend_from_slice(&3u16.to_be_bytes()); // item_count
+
+        // item 1: hvc1, cm=0 (file offset)
+        iloc_content.extend_from_slice(&1u16.to_be_bytes()); // item_id
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // construction_method=0
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc_content.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+        iloc_content.extend_from_slice(&500u32.to_be_bytes()); // extent_offset (file offset)
+        iloc_content.extend_from_slice(&100u32.to_be_bytes()); // extent_length
+
+        // item 2: Exif, cm=0 (file offset) — will be removed
+        iloc_content.extend_from_slice(&2u16.to_be_bytes()); // item_id
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // construction_method=0
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc_content.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+        iloc_content.extend_from_slice(&700u32.to_be_bytes()); // extent_offset
+        iloc_content.extend_from_slice(&50u32.to_be_bytes()); // extent_length
+
+        // item 3: hvc1, cm=1 (idat offset) — should NOT be adjusted
+        iloc_content.extend_from_slice(&3u16.to_be_bytes()); // item_id
+        iloc_content.extend_from_slice(&1u16.to_be_bytes()); // construction_method=1
+        iloc_content.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+        iloc_content.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+        iloc_content.extend_from_slice(&42u32.to_be_bytes()); // extent_offset (idat-relative)
+        iloc_content.extend_from_slice(&200u32.to_be_bytes()); // extent_length
+
+        meta_inner.extend_from_slice(&make_fullbox(b"iloc", 1, 0, &iloc_content));
+
+        // idat box (for construction_method=1 items)
+        let idat_content = vec![0xAAu8; 200];
+        meta_inner.extend_from_slice(&make_box(b"idat", &idat_content));
+
+        heic.extend_from_slice(&make_fullbox(b"meta", 0, 0, &meta_inner));
+        heic.extend_from_slice(&make_box(b"mdat", b"fake image data"));
+        heic
+    }
+
+    #[test]
+    fn test_heic_iloc_cm0_adjusted_cm1_unchanged() {
+        let input = create_heic_with_mixed_construction_methods();
+        let orig_items = parse_iloc_offsets(&input);
+
+        let orig_item1_offset = orig_items.iter().find(|(id, _, _)| *id == 1).unwrap().2[0].0;
+        let orig_item3_offset = orig_items.iter().find(|(id, _, _)| *id == 3).unwrap().2[0].0;
+
+        let output = HeicRemover.remove_metadata(&input, &RemovalOptions::default()).unwrap();
+        let strip_items = parse_iloc_offsets(&output);
+
+        // Item 2 (Exif) removed
+        assert!(strip_items.iter().all(|(id, _, _)| *id != 2));
+
+        let strip_item1 = strip_items.iter().find(|(id, _, _)| *id == 1).unwrap();
+        let strip_item3 = strip_items.iter().find(|(id, _, _)| *id == 3).unwrap();
+
+        // Item 1 (cm=0) offset should be adjusted
+        assert_eq!(strip_item1.1, 0);
+        let orig_meta_pos = input.windows(4).position(|w| w == b"meta").unwrap() - 4;
+        let orig_meta_size = u32::from_be_bytes(input[orig_meta_pos..orig_meta_pos + 4].try_into().unwrap()) as usize;
+        let strip_meta_pos = output.windows(4).position(|w| w == b"meta").unwrap() - 4;
+        let strip_meta_size = u32::from_be_bytes(output[strip_meta_pos..strip_meta_pos + 4].try_into().unwrap()) as usize;
+        let expected_delta = orig_meta_size - strip_meta_size;
+
+        assert!(expected_delta > 0);
+        assert_eq!(strip_item1.2[0].0, orig_item1_offset - expected_delta as u32,
+            "cm=0 item offset should be adjusted by meta shrinkage");
+
+        // Item 3 (cm=1) offset should NOT be adjusted (idat-relative)
+        assert_eq!(strip_item3.1, 1);
+        assert_eq!(strip_item3.2[0].0, orig_item3_offset,
+            "cm=1 item offset should be unchanged (idat-relative)");
     }
 
     /// Verify that all box sizes in the output are internally consistent.
