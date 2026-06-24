@@ -44,7 +44,7 @@ android {
 }
 
 dependencies {
-    api("net.java.dev.jna:jna:5.14.0@aar")
+    api("net.java.dev.jna:jna:5.16.0@aar")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.2.1")
